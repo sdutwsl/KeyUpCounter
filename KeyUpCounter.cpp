@@ -4,8 +4,18 @@
 #include "framework.h"
 #include "KeyUpCounter.h"
 
+#include <shellapi.h>
+#include <commctrl.h>
+
+#pragma comment(lib, "comctl32.lib")
+
+class __declspec(uuid("9D0B8B92-4E1C-488e-A1E1-2331AFCE2CB5")) PrinterIcon;
+UINT const WMAPP_NOTIFYCALLBACK = WM_APP + 1;
+UINT const WMAPP_HIDEFLYOUT = WM_APP + 2;
+
 #define MAX_LOADSTRING 100
 #define PCOUNTER_SIZE 1024
+#define FILE_PATH_MAX 256
 // Global Variables:
 HINSTANCE hInst;                                // current instance
 WCHAR szTitle[MAX_LOADSTRING];                  // The title bar text
@@ -21,13 +31,25 @@ BOOL                InitInstance(HINSTANCE, int);
 LRESULT CALLBACK    WndProc(HWND, UINT, WPARAM, LPARAM);
 INT_PTR CALLBACK    About(HWND, UINT, WPARAM, LPARAM);
 
-VOID SaveDataToFile(UINT* uCounters, SIZE_T uCounterSize, WCHAR* szFileName) {
+
+VOID SaveDataToFile(UINT* uCounters, int uCounterSize, WCHAR* szFileName);
+VOID ReadDataFromFile(UINT* uCounters, int uCounterSize, WCHAR* szFileName);
+LRESULT CALLBACK KeyboardHooker(int nCode, WPARAM wParam, LPARAM lParam);
+BOOL AddNotificationIcon(HWND hwnd);
+BOOL DeleteNotificationIcon();
+VOID ShowContextMenu(HWND hwnd, HMENU hMenu, POINT pt);
+VOID SetBootMenuChecked(BOOL bChecked);
+BOOL IsOpenOnBootValid();
+VOID SetOpenOnBoot();
+VOID ClearOpenOnBoot();
+
+VOID SaveDataToFile(UINT* uCounters, int uCounterSize, WCHAR* szFileName) {
     HANDLE hFile = CreateFile(szFileName, GENERIC_READ | GENERIC_WRITE, NULL, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     WriteFile(hFile, uCounters, uCounterSize * sizeof(UINT), NULL, NULL);
     CloseHandle(hFile);
 }
 
-VOID ReadDataFromFile(UINT* uCounters, SIZE_T uCounterSize, WCHAR* szFileName) {
+VOID ReadDataFromFile(UINT* uCounters, int uCounterSize, WCHAR* szFileName) {
     HANDLE hFile = CreateFile(szFileName, GENERIC_READ | GENERIC_WRITE, NULL, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
     ReadFile(hFile, uCounters, uCounterSize * sizeof(UINT), NULL, NULL);
     CloseHandle(hFile);
@@ -41,6 +63,94 @@ LRESULT CALLBACK KeyboardHooker(int nCode, WPARAM wParam, LPARAM lParam) {
     }
     return CallNextHookEx(0, nCode, wParam, lParam);
 }
+
+BOOL AddNotificationIcon(HWND hwnd)
+{
+    NOTIFYICONDATA nid = { sizeof(nid) };
+    nid.hWnd = hwnd;
+    // add the icon, setting the icon, tooltip, and callback message.
+    // the icon will be identified with the GUID
+    nid.uFlags = NIF_ICON | NIF_TIP | NIF_MESSAGE | NIF_SHOWTIP | NIF_GUID;
+    nid.guidItem = __uuidof(PrinterIcon);
+    nid.uCallbackMessage = WMAPP_NOTIFYCALLBACK;
+    nid.hIcon = LoadIcon(hInst, MAKEINTRESOURCE(IDI_KEYUPCOUNTER));
+    lstrcpynW(nid.szTip, szTitle, MAX_LOADSTRING);
+    Shell_NotifyIcon(NIM_ADD, &nid);
+    // NOTIFYICON_VERSION_4 is prefered
+    nid.uVersion = NOTIFYICON_VERSION_4;
+    return Shell_NotifyIcon(NIM_SETVERSION, &nid);
+}
+
+BOOL DeleteNotificationIcon()
+{
+    NOTIFYICONDATA nid = { sizeof(nid) };
+    nid.uFlags = NIF_GUID;
+    nid.guidItem = __uuidof(PrinterIcon);
+    return Shell_NotifyIcon(NIM_DELETE, &nid);
+}
+
+VOID ShowContextMenu(HWND hwnd,HMENU hMenu, POINT pt)
+{
+    if (hMenu)
+    {
+        HMENU hSubMenu = GetSubMenu(hMenu, 0);
+        if (hSubMenu)
+        {
+            // our window must be foreground before calling TrackPopupMenu or the menu will not disappear when the user clicks away
+            SetForegroundWindow(hwnd);
+
+            // respect menu drop alignment
+            UINT uFlags = TPM_RIGHTBUTTON;
+            if (GetSystemMetrics(SM_MENUDROPALIGNMENT) != 0)
+            {
+                uFlags |= TPM_RIGHTALIGN;
+            }
+            else
+            {
+                uFlags |= TPM_LEFTALIGN;
+            }
+
+            TrackPopupMenuEx(hSubMenu, uFlags, pt.x, pt.y, hwnd, NULL);
+        }
+    }
+}
+
+VOID SetBootMenuChecked(BOOL bChecked) {
+    CheckMenuItem(GetMenu(hWnd), ID_OPTION_BOOTSTART, bChecked ? MF_CHECKED : MF_UNCHECKED);
+}
+
+BOOL IsOpenOnBootValid() {
+    HKEY hKey;
+    BYTE szBootPath[FILE_PATH_MAX] = { 0 };
+    DWORD uBootPathLen = FILE_PATH_MAX;
+    RegOpenKeyEx(HKEY_CURRENT_USER, _T("Software\\Microsoft\\Windows\\CurrentVersion\\Run"), NULL, KEY_READ, &hKey);
+    RegQueryValueEx(hKey, szTitle, NULL, NULL, szBootPath, &uBootPathLen);
+    TCHAR szSelfPath[FILE_PATH_MAX] = { 0 };
+    GetModuleFileName(NULL, szSelfPath, FILE_PATH_MAX);
+    RegCloseKey(hKey);
+    return !lstrcmpW(szSelfPath, reinterpret_cast<PTCHAR>(szBootPath));
+}
+
+VOID SetOpenOnBoot() {
+    HKEY hKey;
+    BYTE szBootPath[FILE_PATH_MAX] = { 0 };
+    DWORD uBootPathLen = FILE_PATH_MAX;
+    RegOpenKeyEx(HKEY_CURRENT_USER, _T("Software\\Microsoft\\Windows\\CurrentVersion\\Run"), NULL, KEY_SET_VALUE, &hKey);
+    TCHAR szSelfPath[FILE_PATH_MAX] = { 0 };
+    GetModuleFileName(NULL, szSelfPath, FILE_PATH_MAX);
+    RegSetValueEx(hKey, szTitle, NULL, REG_SZ, reinterpret_cast<BYTE*>(szSelfPath), lstrlenW(szSelfPath) * sizeof(TCHAR));
+    RegCloseKey(hKey);
+}
+
+VOID ClearOpenOnBoot() {
+    HKEY hKey;
+    BYTE szBootPath[FILE_PATH_MAX] = { 0 };
+    DWORD uBootPathLen = FILE_PATH_MAX;
+    RegOpenKeyEx(HKEY_CURRENT_USER, _T("Software\\Microsoft\\Windows\\CurrentVersion\\Run"), NULL, KEY_SET_VALUE, &hKey);
+    RegDeleteValue(hKey, szTitle);
+    RegCloseKey(hKey);
+}
+
 
 
 int APIENTRY wWinMain(_In_ HINSTANCE hInstance,
@@ -132,7 +242,7 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow)
       return FALSE;
    }
 
-   ShowWindow(hWnd, nCmdShow);
+   ShowWindow(hWnd, SW_HIDE);
    UpdateWindow(hWnd);
 
    return TRUE;
@@ -163,9 +273,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
     switch (message)
     {
     case WM_CREATE:
+        AddNotificationIcon(hWnd);
         ReadDataFromFile(pCounter, PCOUNTER_SIZE, szStaticFile);
         hKeyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, KeyboardHooker, GetModuleHandle(0), 0);
         SetTimer(hWnd, 0, 1000, SaveFileTimerProc);
+        break;
+
+    case WM_CLOSE:
+        ShowWindow(hWnd, SW_HIDE);
         break;
     case WM_COMMAND:
         {
@@ -173,6 +288,15 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
             // Parse the menu selections:
             switch (wmId)
             {
+            case ID_OPTION_BOOTSTART:
+                if (IsOpenOnBootValid()) {
+                    ClearOpenOnBoot();
+                }
+                else {
+                    SetOpenOnBoot();
+                }
+                SetBootMenuChecked(IsOpenOnBootValid());
+                break;
             case ID_FILE_SAVETOFILE:
                 SaveDataToFile(pCounter, PCOUNTER_SIZE, szStaticFile);
                 break;
@@ -205,8 +329,27 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
         }
         break;
     case WM_DESTROY:
+        DeleteNotificationIcon();
         UnhookWindowsHookEx(hKeyboardHook);
         PostQuitMessage(0);
+        break;
+
+    case WMAPP_NOTIFYCALLBACK:
+        switch (LOWORD(lParam))
+        {
+            case WM_CONTEXTMENU:
+            {
+                SetBootMenuChecked(IsOpenOnBootValid());
+                POINT pt;
+                GetCursorPos(&pt);
+                //POINT const pt = { 0,0 };
+                ShowContextMenu(hWnd, GetMenu(hWnd), pt);
+            }
+            break;
+            case WM_LBUTTONUP:
+                ShowWindow(hWnd, SW_SHOW);
+                break;
+        }
         break;
     default:
         return DefWindowProc(hWnd, message, wParam, lParam);
